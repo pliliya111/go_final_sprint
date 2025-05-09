@@ -3,17 +3,18 @@ package handler
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
-	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/pliliya111/go_final_sprint/internal/database"
 	"github.com/pliliya111/go_final_sprint/internal/middleware"
 	"github.com/pliliya111/go_final_sprint/internal/model"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var db *sql.DB // Глобальная переменная
@@ -28,13 +29,6 @@ var (
 	timeMultiplicationMS = getEnvInt("TIME_MULTIPLICATIONS_MS", 1000)
 	timeDivisionMS       = getEnvInt("TIME_DIVISIONS_MS", 1000)
 	validExpressionRegex = regexp.MustCompile(`^[\d\s\+\-\*\/\(\)]+$`)
-)
-var (
-	Expressions = make(map[string]*model.Expression) // Хранение выражений
-	Tasks       []*model.Task                        // Очередь задач
-	TaskMap     = make(map[string]*model.Task)       // Мапа для быстрого поиска задач по ID
-	Results     = make(map[string]interface{})       // Результаты задач
-	Mutex       = &sync.Mutex{}                      // Мьютекс для потокобезопасности
 )
 
 func getEnvInt(key string, defaultValue int) int {
@@ -53,6 +47,7 @@ func parseExpression(expression string) []string {
 	re := regexp.MustCompile(`\d+|\+|\-|\*|\/`)
 	return re.FindAllString(expression, -1)
 }
+
 func AddExpression(c *gin.Context) {
 	var request struct {
 		Expression string `json:"expression"`
@@ -81,26 +76,29 @@ func AddExpression(c *gin.Context) {
 		Status:     "pending",
 		UserId:     userID,
 	}
-	fmt.Println(expr)
-	Mutex.Lock()
-	Expressions[expressionID] = expr
-	Mutex.Unlock()
+
+	if _, err := database.InsertExpression(c.Request.Context(), db, expr); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save expression"})
+		return
+	}
 
 	tokens := parseExpression(request.Expression)
+	var tasks []*model.Task
 
+	// Обработка операций умножения и деления
 	for i := 0; i < len(tokens); i++ {
 		if tokens[i] == "*" || tokens[i] == "/" {
 			arg1ID := tokens[i-1]
 			arg2ID := tokens[i+1]
 			taskID := uuid.New().String()
 			task := &model.Task{
-				ID:        taskID,
-				Arg1:      arg1ID,
-				Arg2:      arg2ID,
-				Operation: tokens[i],
+				ID:           taskID,
+				Arg1:         arg1ID,
+				Arg2:         arg2ID,
+				Operation:    tokens[i],
+				ExpressionId: expressionID,
 			}
-			TaskMap[taskID] = task
-			Tasks = append(Tasks, task)
+			tasks = append(tasks, task)
 			tokens[i-1] = taskID
 			tokens[i] = ""
 			tokens[i+1] = ""
@@ -115,44 +113,56 @@ func AddExpression(c *gin.Context) {
 	}
 	tokens = filteredTokens
 
+	// Обработка операций сложения и вычитания
 	for i := 0; i < len(tokens); i++ {
 		if tokens[i] == "+" || tokens[i] == "-" {
 			arg1ID := tokens[i-1]
 			arg2ID := tokens[i+1]
 			taskID := uuid.New().String()
 			task := &model.Task{
-				ID:        taskID,
-				Arg1:      arg1ID,
-				Arg2:      arg2ID,
-				Operation: tokens[i],
+				ID:           taskID,
+				Arg1:         arg1ID,
+				Arg2:         arg2ID,
+				Operation:    tokens[i],
+				ExpressionId: expressionID,
 			}
-			TaskMap[taskID] = task
-			Tasks = append(Tasks, task)
+			tasks = append(tasks, task)
 			tokens[i-1] = taskID
 			tokens[i] = ""
 			tokens[i+1] = ""
 		}
 	}
 
-	if len(Tasks) > 0 {
-		expr.Result = Tasks[len(Tasks)-1].ID
+	// Вставляем все задачи одним запросом
+	if len(tasks) > 0 {
+		if err := database.InsertTasks(c.Request.Context(), db, tasks); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save tasks"})
+			return
+		}
+
+		expr.Result = tasks[len(tasks)-1].ID
 	}
 	expr.Status = "in_progress"
 
-	fmt.Println("All tasks:")
-	for _, task := range Tasks {
-		fmt.Printf("Task ID: %s, Arg1: %s, Arg2: %s, Operation: %s\n", task.ID, task.Arg1, task.Arg2, task.Operation)
+	if err := database.UpdateExpression(c.Request.Context(), db, expr); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update expression"})
+		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": expressionID})
 }
 
 func GetExpressions(c *gin.Context) {
-	Mutex.Lock()
-	defer Mutex.Unlock()
+	ctx := c.Request.Context()
 
-	expressionsList := make([]gin.H, 0, len(Expressions))
-	for _, expr := range Expressions {
+	expressions, err := database.GetExpressions(ctx, db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch expressions"})
+		return
+	}
+
+	expressionsList := make([]gin.H, 0, len(expressions))
+	for _, expr := range expressions {
 		expressionsList = append(expressionsList, gin.H{
 			"id":     expr.ID,
 			"status": expr.Status,
@@ -162,24 +172,26 @@ func GetExpressions(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"expressions": expressionsList})
 }
-
 func GetExpressionByID(c *gin.Context) {
 	expressionID := c.Param("id")
+	ctx := c.Request.Context()
 
-	Mutex.Lock()
-	expr, exists := Expressions[expressionID]
-	Mutex.Unlock()
-
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "expression not found"})
+	expr, err := database.GetExpressionByID(ctx, db, expressionID)
+	if err != nil {
+		if err.Error() == "expression not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "expression not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch expression"})
+		}
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"expression": gin.H{
-			"id":     expr.ID,
-			"status": expr.Status,
-			"result": expr.Result,
+			"id":         expr.ID,
+			"expression": expr.Expression,
+			"status":     expr.Status,
+			"result":     expr.Result,
 		},
 	})
 }
@@ -200,16 +212,24 @@ func getOperationTime(operation string) int {
 }
 
 func GetTask(c *gin.Context) {
-	Mutex.Lock()
-	defer Mutex.Unlock()
+	ctx := c.Request.Context()
 
-	if len(Tasks) == 0 {
+	task, err := database.GetNextPendingTask(ctx, db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get task"})
+		return
+	}
+
+	if task == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no tasks available"})
 		return
 	}
 
-	task := Tasks[0]
-	Tasks = Tasks[1:]
+	opTime := getOperationTime(task.Operation)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"task": gin.H{
@@ -217,60 +237,41 @@ func GetTask(c *gin.Context) {
 			"arg1":           task.Arg1,
 			"arg2":           task.Arg2,
 			"operation":      task.Operation,
-			"operation_time": getOperationTime(task.Operation),
-			"result":         task.Result,
+			"operation_time": opTime,
+			"expression_id":  task.ExpressionId,
 		},
 	})
-}
-func processTask(task *model.Task, result interface{}) {
-	Mutex.Lock()
-	defer Mutex.Unlock()
-
-	task.Result = result
-	Results[task.ID] = result
-
-	for _, expr := range Expressions {
-		if expr.Result == task.ID {
-			expr.Status = "completed"
-			expr.Result = result
-			break
-		}
-	}
-
-	for _, t := range Tasks {
-		if arg1ID, ok := t.Arg1.(string); ok && arg1ID == task.ID {
-			t.Arg1 = result
-		}
-		if arg2ID, ok := t.Arg2.(string); ok && arg2ID == task.ID {
-			t.Arg2 = result
-		}
-	}
 }
 
 func SubmitTaskResult(c *gin.Context) {
 	var request struct {
-		ID     string      `json:"id"`
-		Result interface{} `json:"result"`
+		ID     string  `json:"id"`
+		Result float64 `json:"result"`
 	}
+
 	if err := c.BindJSON(&request); err != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid data"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid data"})
 		return
 	}
 
-	Mutex.Lock()
-	Results[request.ID] = request.Result
-	fmt.Println(TaskMap)
-	task, exists := TaskMap[request.ID]
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+	ctx := c.Request.Context()
+	if err := database.UpdateTaskResult(ctx, db, request.ID, request.Result); err != nil {
+		fmt.Println(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to submit result"})
 		return
 	}
-
-	Results[request.ID] = request.Result
-	go processTask(task, request.Result)
-	Mutex.Unlock()
 
 	c.JSON(http.StatusOK, gin.H{"message": "result submitted"})
+}
+
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+
+func checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
 }
 
 func RegisterUser(c *gin.Context) {
@@ -282,10 +283,13 @@ func RegisterUser(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "Invalid request data"})
 		return
 	}
-
+	hashedPassword, err := hashPassword(request.Password)
+	if err != nil {
+		log.Fatalf("Ошибка хэширования пароля: %v", err)
+	}
 	user := model.User{
 		Name:     request.Name,
-		Password: request.Password,
+		Password: hashedPassword,
 	}
 
 	userID, err := database.InsertUser(c.Request.Context(), db, &user)
@@ -324,21 +328,6 @@ func LoginUser(c *gin.Context) {
 		return
 	}
 
-	// // 2. Создаем JWT-токен
-	// const hmacSampleSecret = "super_secret_signature" // Замените на ваш секретный ключ
-	// now := time.Now()
-	// token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-	// 	"name": user.Name,
-	// 	"nbf":  now.Add(time.Minute).Unix(),
-	// 	"exp":  now.Add(5 * time.Minute).Unix(),
-	// 	"iat":  now.Unix(),
-	// })
-
-	// tokenString, err := token.SignedString([]byte(hmacSampleSecret))
-	// if err != nil {
-	// 	c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create token"})
-	// 	return
-	// }
 	tokenString, err := middleware.GenerateToken(user.Name, int(user.ID))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create token"})

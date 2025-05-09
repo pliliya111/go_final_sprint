@@ -74,6 +74,8 @@ go run cmd/agent/main.go
 ### Запуск тестов
 ```
 go test -v ./...
+go test -v ./internal/handler
+go test -v ./internal/calculator
 ```
 
 ## Запуск через Docker Compose
@@ -94,7 +96,7 @@ curl --location 'localhost:8080/api/v1/register' \
   "password": "123"
 }'
 ```
-1) Логин пользователя
+2) Логин пользователя
 ```
 curl --location 'localhost:8080/api/v1/login' \
 --header 'Content-Type: application/json' \
@@ -103,11 +105,11 @@ curl --location 'localhost:8080/api/v1/login' \
   "password": "123"
 }'
 ```
-1) Добавление выражения для вычисления
+3) Добавление выражения для вычисления
 ```
 curl --location 'localhost:8080/api/v1/calculate' \
 --header 'Content-Type: application/json' \
---header 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDY3MDA3NzksImlhdCI6MTc0NjcwMDQ3OSwiaWQiOjEsIm5hbWUiOiJ1c2VyXzEiLCJuYmYiOjE3NDY3MDA0Nzl9.BhDKu_uYWSbFiOVS9a8qI5KrG1cSChsHxAaXNPutvBc' \
+--header 'Authorization: Bearer <Token>' \
 --data '{
   "expression": "2+2*2"
 }'
@@ -118,10 +120,10 @@ curl --location 'localhost:8080/api/v1/calculate' \
 ```commandline
 {"id":"a91f6bf8-2008-4b00-b44b-8ac81534e135"}
 ```
-3. Получение списка выражений
+4) Получение списка выражений
 ```commandline
 curl --location 'localhost:8080/api/v1/expressions' \
---header 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDY3MDI3ODgsImlhdCI6MTc0NjcwMjQ4OCwiaWQiOjEsIm5hbWUiOiJ1c2VyXzEiLCJuYmYiOjE3NDY3MDI0ODh9.B2lWOKlvRNF_W45_3o_uw75I_aYuxJojWZlFh5BgmJE' 
+--header 'Authorization: Bearer <Token>' 
 ```
 Ответ:
 - Код ответа: 200
@@ -142,7 +144,7 @@ curl --location 'localhost:8080/api/v1/expressions' \
   ]
 }
 ```
-4. Получение выражения по идентификатору
+5) Получение выражения по идентификатору
 ```
 curl --location 'localhost:8080/api/v1/expressions/db035ace-6fa0-4f7a-97fa-f37f08cb3761'
 ```
@@ -164,7 +166,7 @@ curl --location 'localhost:8080/api/v1/expressions/db035ace-6fa0-4f7a-97fa-f37f0
 ```
 {"error": "task not found"}
 ```
-5. Получение задачи для выполнения (для агентов)
+6) Получение задачи для выполнения (для агентов)
 ```
 curl --location 'localhost:8080/internal/task'
 ```
@@ -182,13 +184,13 @@ curl --location 'localhost:8080/internal/task'
   }
 }
 ```
-7. Отправка результата выполнения задачи (для агентов)
+7) Отправка результата выполнения задачи (для агентов)
 ```
 curl --location 'localhost:8080/internal/task' \
 --header 'Content-Type: application/json' \
 --data '{
-  "id": "ad6c3f6c-787e-4d94-843b-63f60a013f86",
-  "result": 4
+  "id": "cd7f328a-31a6-4d57-8b0c-796cbfe42316",
+  "result": 6
 }'
 ```
 Ответ:

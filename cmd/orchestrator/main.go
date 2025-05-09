@@ -2,66 +2,33 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"log"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/pliliya111/go_final_sprint/internal/database"
 	"github.com/pliliya111/go_final_sprint/internal/handler"
 	"github.com/pliliya111/go_final_sprint/internal/middleware"
 )
 
-func createTables(ctx context.Context, db *sql.DB) error {
-	fmt.Println("создаем таблицы")
-	const (
-		usersTable = `
-	CREATE TABLE IF NOT EXISTS users(
-		id INTEGER PRIMARY KEY AUTOINCREMENT, 
-		name TEXT,
-		password TEXT
-	);`
-
-		expressionsTable = `
-	CREATE TABLE IF NOT EXISTS expressions(
-		id INTEGER PRIMARY KEY AUTOINCREMENT, 
-		expression TEXT NOT NULL,
-		status TEXT NOT NULL,
-		Result TEXT,
-		user_id INTEGER NOT NULL,
-	
-		FOREIGN KEY (user_id)  REFERENCES expressions (id)
-	);`
-	)
-
-	if _, err := db.ExecContext(ctx, usersTable); err != nil {
-		return err
-	}
-
-	if _, err := db.ExecContext(ctx, expressionsTable); err != nil {
-		return err
-	}
-
-	return nil
-}
 func main() {
 	ctx := context.TODO()
 
-	db, err := sql.Open("sqlite3", "store.db")
-
+	db, err := database.OpenDatabase("store.db")
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to open database: %v", err)
 	}
-	handler.SetDB(db)
 	defer db.Close()
+
+	handler.SetDB(db)
 
 	err = db.PingContext(ctx)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to ping database: %v", err)
 	}
 
-	if err = createTables(ctx, db); err != nil {
-		panic(err)
+	if err = database.CreateTables(ctx, db); err != nil {
+		log.Fatalf("Failed to create tables: %v", err)
 	}
 	r := gin.Default()
 
